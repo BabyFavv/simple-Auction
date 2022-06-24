@@ -1,68 +1,28 @@
   // SPDX-License-Identifier: MIT
    pragma solidity ^0.8.1;
+  
+ 
+  
+interface IERC721 {
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint tokenId
+    ) external;
 
-import "@openzeppelin/contracts/utils/Timers.sol";
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-
-
-
-contract AuctionNFT is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable {
-    using Counters for Counters.Counter;
-
-    Counters.Counter private _tokenIdCounter;
-
-    constructor() ERC721("AuctionNFT", "ANFT") {}
-
-    // mint an NFT
-    function safeMint(address to, string memory uri) public onlyOwner {
-        uint256 tokenId = _tokenIdCounter.current();
-        _tokenIdCounter.increment();
-        _safeMint(to, tokenId);
-        _setTokenURI(tokenId, uri);
-    }
-
-
-    // The following functions are overrides required by Solidity.
-    function _beforeTokenTransfer(address from, address to, uint256 tokenId)
-        internal
-        override(ERC721, ERC721Enumerable)
-    {
-        super._beforeTokenTransfer(from, to, tokenId);
-    }
-
-    //    destroy an NFT
-    function _burn(uint256 tokenId) internal override(ERC721, ERC721URIStorage) {
-        super._burn(tokenId);
-    }
-
-    //    return IPFS url of NFT metadata
-    function tokenURI(uint256 tokenId)
-        public
-        view
-        override(ERC721, ERC721URIStorage)
-        returns (string memory)
-    {
-        return super.tokenURI(tokenId);
-    }
-
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        override(ERC721, ERC721Enumerable)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
-    }
+    function transferFrom(
+        address,
+        address,
+        uint
+    ) external;
 }
 
 contract MyAuction {
     address payable public beneficiary;
-    uint public autionEndTime;
+    uint public auctionEndTime;
+        IERC721 public nft;
+
+    uint public tokenId;
     address public highestBidder;
     uint public highestBid;
     mapping(address => uint) public pendingReturns;
@@ -73,58 +33,69 @@ contract MyAuction {
 
 
 // constructor when for when sdeploying the contract
-    constructor (uint _biddingTime, address payable _beneficiary){
-        beneficiary = _beneficiary;
-        autionEndTime = block.timestamp + _biddingTime;
+    constructor (uint _biddingTime, address _beneficiary, address _nft, uint _tokenId){
+        beneficiary = payable(_beneficiary);
+        auctionEndTime = block.timestamp + _biddingTime;
+        nft = IERC721(_nft);
+        tokenId = _tokenId;
+    }
+
+       modifier canBid {
+        require(msg.sender != beneficiary, "You can't bid on your own token");
+        require(msg.sender != highestBidder, "You can't outbid yourself");
+        require(block.timestamp < auctionEndTime, "The aution has already ended");
+        require(ended == false, "The auction is already over");
+        require(msg.value > highestBid && msg.value > 0, "You need to bid more than the current bid");
+        _;
+    }
+
+    modifier canWithdraw {
+        uint amount = pendingReturns[msg.sender];
+        require(msg.sender != highestBidder, "You can't withdraw as the current highest bidder");
+        require(amount > 0, "You have no pending withdrawals");
+        _;
+    }
+      modifier canAuctionEnd {
+        require(block.timestamp > auctionEndTime, "There is still time to bid");
+        require(ended == false, "Auction is already over");
+        require(msg.sender ==  beneficiary, "only the beneficiary can end the auction");
+        _;
     }
 
 
 
 // function to bid for an auction
- function bid() public payable{
-     if (block.timestamp > autionEndTime){
-         revert("The aution has already ended");
-     }
-   if (msg.value < highestBid){
-       revert ("they is already a higher bidder");
-   }
-   if (highestBid !=0){
-       pendingReturns[highestBidder] += highestBid;
-   }
-   highestBidder = msg.sender;
-   highestBid = msg.value;
-   emit highestBidIncrease(msg.sender, msg.value);
- }
+   function bid() public payable canBid{
+        uint currentBid = highestBid;
+        highestBid = 0;
+        pendingReturns[highestBidder] += currentBid;
+        highestBidder = msg.sender;
+        highestBid = msg.value;
+        emit highestBidIncrease(msg.sender, msg.value);
+    }
 
 
 
 // function to witdraw from the auction
- function Withdraw() public returns (bool){
-     uint amount = pendingReturns[msg.sender];
-     if (amount > 0){
-         pendingReturns[msg.sender] =0;
-        if (payable(msg.sender).send(amount)){
+    function Withdraw() public payable canWithdraw returns (bool){
+        uint amount = pendingReturns[msg.sender];
+        pendingReturns[msg.sender] = 0;
+        (bool success,) = payable(msg.sender).call{value: amount}("");
+        if (success == false){
             pendingReturns[msg.sender] = amount;
             return false;
-        }
-     }
-     return true;
+                  }
+        return true;
 
  }
 
-// end an auction
- function autionEnd()public {
-if (block.timestamp < autionEndTime){
-    revert("the aution hasnt ended yet");
-}
-if (ended){
-    revert("the aution has Ended" );
-            
-}
-ended = true;
-emit AuctionEnded(highestBidder, highestBid);
-beneficiary.transfer(highestBid);
- 
-     }
-  
+  function auctionEnd() public payable canAuctionEnd {
+        uint amount = highestBid;
+        highestBid = 0;
+        (bool success,) = beneficiary.call{value: amount}("");
+        require(success, "Payment transfer to beneficiary failed");
+        nft.safeTransferFrom(beneficiary, highestBidder, tokenId);
+        ended = true;
+        emit AuctionEnded(highestBidder, amount);
+    }
  }
